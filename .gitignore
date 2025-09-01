@@ -1,0 +1,19 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Ansible
+.artifacts/
+*.retry
+
+# Molecule
+.molecule/
+
+# Secrets
+secrets/*.yml
+secrets/*.yaml
+!secrets/README.md
+
+# OS / misc
+.DS_Store

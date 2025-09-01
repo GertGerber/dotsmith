@@ -1,0 +1,22 @@
+---
+- name: Secrets | Load per-user file if it exists (~/.config/dotfiles/secrets.yml)
+  ansible.builtin.include_vars:
+    file: "{{ ansible_user_dir }}/.config/dotfiles/secrets.yml"
+  ignore_errors: true
+
+- name: Secrets | Optionally load Ansible Vault (secrets/vault.yml)
+  when: "'vault' in df_secrets_provider"
+  ansible.builtin.include_vars:
+    file: "{{ playbook_dir | dirname }}/secrets/vault.yml"
+  ignore_errors: true
+
+# SOPS integration stub (uncomment and provide file if you use SOPS)
+# - name: Secrets | Load SOPS file
+#   when: "'sops' in df_secrets_provider"
+#   ansible.builtin.include_vars:
+#     file: "{{ playbook_dir | dirname }}/secrets/sops.secrets.yml"
+
+- name: Secrets | Normalise git variables (soft-fail if absent)
+  ansible.builtin.set_fact:
+    git_user_name: "{{ git_user_name | default(omit) }}"
+    git_user_email: "{{ git_user_email | default(omit) }}"

@@ -1,0 +1,32 @@
+---
+- name: Install GitHub CLI on Debian/Ubuntu
+  ansible.builtin.apt:
+    name: gh
+    state: present
+    update_cache: true
+  become: true
+  when: ansible_facts.os_family == 'Debian'
+
+- name: Install GitHub CLI on RedHat/Fedora
+  ansible.builtin.dnf:
+    name: gh
+    state: present
+  become: true
+  when: ansible_facts.os_family == 'RedHat'
+
+- name: Install GitHub CLI on Arch
+  community.general.pacman:
+    name: github-cli
+    state: present
+  become: true
+  when: ansible_facts.os_family == 'Archlinux'
+
+- name: Install GitHub CLI on macOS
+  community.general.homebrew:
+    name: gh
+    state: present
+  when: ansible_facts.os_family == 'Darwin'
+
+- name: Hint for authentication (no auto-login)
+  ansible.builtin.debug:
+    msg: "Run 'gh auth login' to authenticate if required."

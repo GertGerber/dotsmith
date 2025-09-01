@@ -1,8 +1,36 @@
 ---
-- name: Example play
+- name: Dotfiles bootstrap
   hosts: all
-  gather_facts: false
-  tasks:
-    - name: Example task
+  gather_facts: true
+
+  vars:
+    df_secrets_provider: "{{ lookup('env', 'DF_SECRETS_PROVIDER') | default('env,file,vault', true) }}"
+
+  pre_tasks:
+    - name: Assert local connection for dotfiles
+      ansible.builtin.assert:
+        that: ansible_connection == 'local'
+        fail_msg: "This playbook expects a local connection (localhost)."
+
+    - name: Banner | Show run context
       ansible.builtin.debug:
-        msg: "Hello from CI"
+        msg:
+          - "dotsmith — {{ lookup('env','DF_RELEASE') | default(lookup('env','DF_REF'), true) | default('unknown', true) }}"
+          - "Host: {{ inventory_hostname }}  User: {{ ansible_user_id }}  Time: {{ ansible_date_time.iso8601 }}"
+      verbosity: 0
+
+    - name: Banner | Print static banner if present
+      ansible.builtin.slurp:
+        src: "{{ playbook_dir | dirname }}/assets/banner.txt"
+      register: banner_file
+      failed_when: false
+
+    - name: Banner | Display
+      when: banner_file is defined and banner_file.content is defined
+      ansible.builtin.debug:
+        msg: "{{ banner_file.content | b64decode }}"
+
+  roles:
+    - role: secrets_resolver
+    - role: gh
+    - role: git

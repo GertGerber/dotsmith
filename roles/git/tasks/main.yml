@@ -1,0 +1,25 @@
+---
+- name: Ensure git is present (package manager specific)
+  ansible.builtin.package:
+    name: git
+    state: present
+  become: true
+
+- name: Configure git user.name if provided
+  when: git_user_name is defined
+  community.general.git_config:
+    name: user.name
+    value: "{{ git_user_name }}"
+    scope: global
+
+- name: Configure git user.email if provided
+  when: git_user_email is defined
+  community.general.git_config:
+    name: user.email
+    value: "{{ git_user_email }}"
+    scope: global
+
+- name: Report if identity not set
+  when: git_user_name is not defined or git_user_email is not defined
+  ansible.builtin.debug:
+    msg: "git identity not fully configured (missing user.name or user.email); skipping."

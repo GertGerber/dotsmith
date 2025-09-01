@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Defaults (can be overridden via env)
+DF_REPO="${DF_REPO:-github.com/your-org/dotsmith}"
+DF_REF="${DF_REF:-main}"
+DF_RELEASE="${DF_RELEASE:-}"
+DF_DEST="${DF_DEST:-$HOME/.local/src/dotsmith}"
+DF_BANNER="${DF_BANNER:-1}"
+DF_BANNER_FILE="${DF_BANNER_FILE:-assets/banner.txt}"
+DF_SECRETS_PROVIDER="${DF_SECRETS_PROVIDER:-env,file,vault}"
+
+print_usage() {
+  cat <<EOF
+Usage: $(basename "$0") {init|update|apply|--check|check} [ansible-playbook args...]
+
+  Commands
+    init     Fetch source from GitHub (branch/tag or release) into \$DF_DEST
+    update   Re-fetch source and re-install dependencies
+    apply    Run the playbook (default if omitted)
+    --check  Dry-run the playbook (alias: check)
+
+  Key environment variables
+    DF_REPO, DF_REF, DF_RELEASE, DF_DEST
+    DF_SECRETS_PROVIDER (default: env,file,vault)
+    DF_BANNER(=1|0), DF_BANNER_FILE
+EOF
+}
+
+# --- Banner ---
+print_banner() {
+  [ "${DF_BANNER}" = "0" ] && return 0
+  local file="${DF_BANNER_FILE}"
+  if [ -f "$file" ]; then cat "$file"; fi
+  printf "\nProject : dotsmith\nRef     : %s\nHost    : localhost\nUser    : %s\nTime    : %s\n\n" \
+    "${DF_RELEASE:-$DF_REF}" "$(id -un 2>/dev/null || whoami)" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+}
+
+# --- Helpers ---
+have() { command -v "$1" >/dev/null 2>&1; }
+
+ensure_python() {
+  if have python3; then PYTHON=python3
+  elif have python; then PYTHON=python
+  else
+    echo "Python is required (python3). Install it and retry." >&2
+    exit 1
+  fi
+}
+
+ensure_venv() {
+  ensure_python
+  if [ ! -d ".venv" ]; then
+    "$PYTHON" -m venv .venv
+  fi
+  # shellcheck disable=SC1091
+  source .venv/bin/activate
+  python -m pip install --upgrade pip >/dev/null
+  pip install -r requirements.txt
+  ansible-galaxy collection install -r collections/requirements.yml --force 2>/dev/null || true
+  ansible-galaxy role install -r roles/requirements.yml --force 2>/dev/null || true
+}
+
+fetch_git() {
+  local repo="$1" ref="$2" dest="$3"
+  if [ ! -d "$dest/.git" ]; then
+    git clone "https://$repo" "$dest"
+  fi
+  git -C "$dest" fetch --all --tags --prune
+  if git -C "$dest" rev-parse --verify "$ref" >/dev/null 2>&1; then
+    git -C "$dest" checkout -f "$ref"
+  else
+    git -C "$dest" checkout -f "origin/$ref" || git -C "$dest" checkout -f "$ref"
+  fi
+}
+
+fetch_tar() {
+  local repo="$1" ref="$2" dest="$3"
+  local tmp; tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' RETURN
+  local url1="https://$repo/archive/refs/tags/${ref}.tar.gz"
+  local url2="https://$repo/archive/${ref}.tar.gz"
+  curl -fsSL "$url1" -o "$tmp/src.tgz" || curl -fsSL "$url2" -o "$tmp/src.tgz"
+  mkdir -p "$dest"
+  tar -xzf "$tmp/src.tgz" --strip-components=1 -C "$dest"
+}
+
+df_init() {
+  mkdir -p "$(dirname "$DF_DEST")"
+  if [ -n "$DF_RELEASE" ]; then
+    if have gh; then
+      mkdir -p "$DF_DEST"
+      tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' RETURN
+      gh release download "$DF_RELEASE" -R "$DF_REPO" -D "$tmp" || true
+      # fallback if no assets match: download source tarball
+      if ! ls "$tmp"/*.tar.gz >/dev/null 2>&1; then
+        fetch_tar "$DF_REPO" "$DF_RELEASE" "$DF_DEST"
+      else
+        tar -xzf "$(ls "$tmp"/*.tar.gz | head -n1)" --strip-components=1 -C "$DF_DEST"
+      fi
+    elif have curl && have tar; then
+      fetch_tar "$DF_REPO" "$DF_RELEASE" "$DF_DEST"
+    else
+      echo "Need gh or curl+tar to download a release." >&2
+      exit 1
+    fi
+  else
+    if have git; then
+      fetch_git "$DF_REPO" "$DF_REF" "$DF_DEST"
+    elif have curl && have tar; then
+      fetch_tar "$DF_REPO" "$DF_REF" "$DF_DEST"
+    else
+      echo "Need git or curl+tar to fetch code." >&2
+      exit 1
+    fi
+  fi
+  echo "✓ Fetched $DF_REPO @ ${DF_RELEASE:-$DF_REF} to $DF_DEST"
+  [ -f "$DF_DEST/scripts/df" ] && echo "Run: $DF_DEST/scripts/df --check -i $DF_DEST/inventories/local/hosts.ini"
+}
+
+df_update() {
+  df_init
+  cd "$DF_DEST"
+  ensure_venv
+  echo "✓ Dependencies refreshed"
+}
+
+run_playbook() {
+  print_banner
+  ensure_venv
+  export DF_SECRETS_PROVIDER
+  ansible-playbook -i inventories/local/hosts.ini playbooks/site.yml "$@"
+}
+
+main() {
+  local cmd="${1:-apply}"
+  case "$cmd" in
+    -h|--help|help) print_usage; exit 0 ;;
+    init) shift; df_init "$@";;
+    update) shift; df_update "$@";;
+    apply) shift; run_playbook "$@";;
+    --check|check) shift; run_playbook --check "$@";;
+    *) # treat as ansible args for apply
+       run_playbook "$cmd" "$@";;
+  esac
+}
+
+main "$@"
