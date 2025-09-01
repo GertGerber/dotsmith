@@ -1,0 +1,444 @@
+#!/usr/bin/env bash
+# Modernised dotfiles installer
+# - Portable, robust, and non-interactive friendly
+# - Fixes known issues (undefined colours, sed portability, Arch pkg names, OS var for Galaxy)
+# - Adds flags, better error handling, and structured logging
+#
+# Tested shells: bash 5+
+
+set -Eeuo pipefail
+IFS=$'\n\t'
+
+# ------------------------------
+# Constants & Defaults
+# ------------------------------
+SCRIPT_NAME=${0##*/}
+DOTFILES_REPO_URL="https://github.com/GertGerber/dotfiles.git"
+DOTFILES_DIR="${HOME}/.dotfiles"
+DOTFILES_LOG="${HOME}/.dotfiles.log"
+CONFIG_FILE="${DOTFILES_DIR}/group_vars/all.yml"
+IS_FIRST_RUN_MARKER="${HOME}/.dotfiles_run"
+VAULT_SECRET_FILE="${HOME}/.ansible-vault/vault.secret"
+
+# Flags (can be overridden by CLI)
+OS_OVERRIDE=""           # --os <id>
+NON_INTERACTIVE=false     # --non-interactive
+ASSUME_YES=false          # --yes / -y
+REQUIRE_OP=false          # --require-op
+SKIP_GALAXY=false         # --skip-galaxy
+VERBOSE=false             # --verbose / -v
+
+UNINSTALL_ROLE=""        # --uninstall <role>
+DELETE_ROLE=""           # --delete <role>
+
+# Colour support: prefer tput, fallback to ANSI
+if command -v tput >/dev/null 2>&1 && [ -n "${TERM-}" ] && [ "$(tput colors)" -ge 8 ]; then
+  BOLD="$(tput bold)"; NC="$(tput sgr0)"
+  # Catppuccin palette (approx via 256/truecolor not guaranteed in tput)
+  CAT_RED="\033[38;2;243;139;168m";      CAT_GREEN="\033[38;2;166;227;161m"
+  CAT_YELLOW="\033[38;2;249;226;175m";  CAT_BLUE="\033[38;2;137;180;250m"
+  CAT_MAUVE="\033[38;2;203;166;247m";   CAT_TEAL="\033[38;2;148;226;213m"
+  CAT_SAPPHIRE="\033[38;2;116;199;236m";CAT_TEXT="\033[38;2;205;214;244m"
+  CAT_OVERLAY1="\033[38;2;127;132;156m";CAT_GREEN2="\033[38;2;166;227;161m"
+  ORANGE="\033[38;2;250;179;135m" # fixed missing ORANGE
+else
+  BOLD=''; NC=''
+  CAT_RED=''; CAT_GREEN=''; CAT_YELLOW=''; CAT_BLUE=''; CAT_MAUVE=''; CAT_TEAL=''; CAT_SAPPHIRE=''; CAT_TEXT=''; CAT_OVERLAY1=''; ORANGE=''
+fi
+
+GREEN=${CAT_GREEN}; RED=${CAT_RED}; YELLOW=${CAT_YELLOW}; BLUE=${CAT_BLUE}; PURPLE=${CAT_MAUVE}; CYAN=${CAT_TEAL}; WHITE=${CAT_TEXT}
+
+CHECK_MARK="${GREEN}\xE2\x9C\x94${NC}"; X_MARK="${RED}\xE2\x9C\x96${NC}"
+PIN="${RED}\xF0\x9F\x93\x8C${NC}"; CLOCK="${GREEN}\xE2\x8C\x9B${NC}"
+ARROW="${CAT_SAPPHIRE}\xE2\x96\xB6${NC}"; BOOK="${RED}\xF0\x9F\x93\x8B${NC}"
+HOT="${ORANGE}\xF0\x9F\x94\xA5${NC}"; WARNING="${RED}\xF0\x9F\x9A\xA8${NC}"
+
+# ------------------------------
+# banner
+# ------------------------------
+function print_banner() {
+echo ""
+    echo -e "${SEA}  ██████╗ ███████╗██████╗ ████████╗     ██████╗ ███████╗██████╗ ██████╗ ███████╗██████╗ ${ORANGE} Dotfiles Installer ${NC}"
+    echo -e "${SEA} ██╔════╝ ██╔════╝██╔══██╗╚══██╔══╝    ██╔════╝ ██╔════╝██╔══██╗██╔══██╗██╔════╝██╔══██╗${BLUE} by GertGerber ${NC}"
+    echo -e "${SEA} ██║  ███╗█████╗  ██████╔╝   ██║       ██║  ███╗█████╗  ██████╔╝██████╔╝█████╗  ██████╔╝${PURPLE} Setup your dev environment ${NC}"
+    echo -e "${SEA} ██║   ██║██╔══╝  ██╔══██╗   ██║       ██║   ██║██╔══╝  ██╔══██╗██╔══██╗██╔══╝  ██╔══██╗${YELLOW} Enjoy coding! 🚀${NC}"
+    echo -e "${SEA} ╚██████╔╝███████╗██║  ██║   ██║       ╚██████╔╝███████╗██║  ██║██████╔╝███████╗██║  ██║${GREEN} Have fun with roles! 🎉${NC}"
+    echo -e "${SEA}  ╚═════╝ ╚══════╝╚═╝  ╚═╝   ╚═╝        ╚═════╝ ╚══════╝╚═╝  ╚═╝╚═════╝ ╚══════╝╚═╝  ╚═╝${NC}"
+    echo ""
+    echo -e "${CAT_BLUE}        ██████╗  ██████╗ ████████╗███████╗██╗██╗     ███████╗███████╗${NC}"
+    echo -e "${CAT_BLUE}        ██╔══██╗██╔═══██╗╚══██╔══╝██╔════╝██║██║     ██╔════╝██╔════╝${NC}"
+    echo -e "${CAT_BLUE}        ██║  ██║██║   ██║   ██║   █████╗  ██║██║     █████╗  ███████╗${NC}"
+    echo -e "${CAT_BLUE}        ██║  ██║██║   ██║   ██║   ██╔══╝  ██║██║     ██╔══╝  ╚════██║${NC}"
+    echo -e "${CAT_BLUE}        ██████╔╝╚██████╔╝   ██║   ██║     ██║███████╗███████╗███████║${NC}"
+    echo -e "${CAT_BLUE}        ╚═════╝  ╚═════╝    ╚═╝   ╚═╝     ╚═╝╚══════╝╚══════╝╚══════╝${NC}"
+    echo ""
+}
+
+print_banner
+  
+# ------------------------------
+# Logging & Spinner
+# ------------------------------
+SPINNER_PID=""; TASK=""
+
+log_init() { : >"${DOTFILES_LOG}"; }
+log_note() { printf '%s\n' "$*" >>"${DOTFILES_LOG}"; }
+
+hide_cursor() { command -v tput >/dev/null 2>&1 && tput civis || true; }
+show_cursor() { command -v tput >/dev/null 2>&1 && tput cnorm || true; }
+
+spinner() {
+  local text=$1; local delay=0.08
+  hide_cursor
+  while :; do
+    for c in '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏'; do
+      printf "\r${CAT_OVERLAY1} [${CAT_SAPPHIRE}%s${CAT_OVERLAY1}]  ${WHITE}%s${NC}" "$c" "$text" >&2
+      sleep "$delay"
+    done
+  done
+}
+
+start_task() {
+  [ -n "${TASK}" ] && end_task_success || true
+  TASK="$*"
+  spinner "$TASK" & SPINNER_PID=$!
+  disown "$SPINNER_PID" 2>/dev/null || true
+}
+
+end_task_success() {
+  if [ -n "${SPINNER_PID}" ]; then kill "${SPINNER_PID}" 2>/dev/null || true; wait "${SPINNER_PID}" 2>/dev/null || true; SPINNER_PID=""; fi
+  show_cursor
+  printf "\r\033[K${CAT_GREEN} [✓]  ${WHITE}%s${NC}\n" "${TASK}" >&2
+  TASK=""
+}
+
+end_task_fail() {
+  local msg=$1
+  if [ -n "${SPINNER_PID}" ]; then kill "${SPINNER_PID}" 2>/dev/null || true; wait "${SPINNER_PID}" 2>/dev/null || true; SPINNER_PID=""; fi
+  show_cursor
+  printf "\r\033[K${CAT_RED} [✗]  ${WHITE}%s${NC}\n" "${TASK}" >&2
+  if [ -s "${DOTFILES_LOG}" ]; then
+    while IFS= read -r line; do printf "      ${CAT_MAUVE}%s${NC}\n" "$line" >&2; done <"${DOTFILES_LOG}"
+  fi
+  [ -n "$msg" ] && printf "      ${CAT_MAUVE}%s${NC}\n" "$msg" >&2 || true
+  exit 1
+}
+
+run_cmd() {
+  local cmd="$1"
+  : >"${DOTFILES_LOG}"
+  if eval "$cmd" 1>>"${DOTFILES_LOG}" 2>&1; then
+    $VERBOSE && sed 's/^/      /' "${DOTFILES_LOG}" >&2 || true
+    return 0
+  else
+    end_task_fail "Command failed: $cmd"
+  fi
+}
+
+cleanup() {
+  if [ -n "${SPINNER_PID}" ]; then kill "${SPINNER_PID}" 2>/dev/null || true; wait "${SPINNER_PID}" 2>/dev/null || true; fi
+  show_cursor
+}
+trap cleanup EXIT INT TERM
+
+# ------------------------------
+# Helpers
+# ------------------------------
+detect_os() {
+  if [ -n "${OS_OVERRIDE}" ]; then printf '%s\n' "${OS_OVERRIDE}"; return; fi
+  if [ -f /etc/os-release ]; then . /etc/os-release; printf '%s\n' "${ID}"; return; fi
+  unameOut=$(uname -s | tr '[:upper:]' '[:lower:]')
+  [ "$unameOut" = "darwin" ] && { printf 'darwin\n'; return; }
+  printf '%s\n' "$unameOut"
+}
+
+has_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+portable_sed_delete_line() {
+  # Usage: portable_sed_delete_line <pattern> <file>
+  local pattern="$1"; local file="$2"
+  if sed --version >/dev/null 2>&1; then
+    sed -i "/${pattern}/d" "$file"
+  else
+    # BSD sed
+    sed -i '' "/${pattern}/d" "$file"
+  fi
+}
+
+confirm() {
+  $ASSUME_YES && return 0
+  $NON_INTERACTIVE && return 1
+  printf "%b %s %b" "${YELLOW}[?]${NC}" "$1 (y/N): " "${NC}"
+  read -r ans || true
+  case "${ans:-}" in
+    [Yy]*) return 0 ;; *) return 1 ;;
+  esac
+}
+
+# ------------------------------
+# Package Installers
+# ------------------------------
+ubuntu_setup() {
+  start_task "Installing dependencies for Ubuntu"
+  run_cmd "sudo apt-get update -y"
+  has_cmd git || run_cmd "sudo apt-get install -y git"
+  has_cmd ansible || {
+    run_cmd "sudo apt-get install -y software-properties-common"
+    run_cmd "sudo apt-add-repository -y ppa:ansible/ansible"
+    run_cmd "sudo apt-get update -y"
+    run_cmd "sudo apt-get install -y ansible"
+  }
+  has_cmd python3 || run_cmd "sudo apt-get install -y python3"
+  has_cmd pip3 || run_cmd "sudo apt-get install -y python3-pip"
+  python3 -c 'import watchdog' 2>/dev/null || run_cmd "pip3 install --user watchdog"
+  end_task_success
+}
+
+arch_setup() {
+  start_task "Installing dependencies for Arch"
+  run_cmd "sudo pacman -Sy --noconfirm"
+  has_cmd ansible || run_cmd "sudo pacman -S --noconfirm ansible"
+  has_cmd python3 || run_cmd "sudo pacman -S --noconfirm python"  # Python package is 'python'
+  has_cmd pip3 || run_cmd "sudo pacman -S --noconfirm python-pip"
+  python3 -c 'import watchdog' 2>/dev/null || run_cmd "sudo pacman -S --noconfirm python-watchdog || pip3 install --user watchdog"
+  has_cmd ssh || run_cmd "sudo pacman -S --noconfirm openssh"
+  # Locale: make configurable; default to en_NZ.UTF-8 if available
+  if locale -a 2>/dev/null | grep -qi '^en_NZ\.utf8$'; then
+    run_cmd "sudo localectl set-locale LANG=en_NZ.UTF-8"
+  else
+    run_cmd "sudo localectl set-locale LANG=en_US.UTF-8"
+  fi
+  end_task_success
+}
+
+fedora_setup() {
+  start_task "Installing dependencies for Fedora"
+  has_cmd ansible || run_cmd "sudo dnf install -y ansible"
+  has_cmd python3 || run_cmd "sudo dnf install -y python3"
+  has_cmd pip3 || run_cmd "sudo dnf install -y python3-pip"
+  python3 -c 'import argcomplete' 2>/dev/null || run_cmd "sudo dnf install -y python3-argcomplete || true"
+  python3 -c 'import watchdog' 2>/dev/null || run_cmd "pip3 install --user watchdog"
+  end_task_success
+}
+
+darwin_setup() {
+  start_task "Installing dependencies for macOS"
+  has_cmd brew || run_cmd "/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
+  has_cmd git || run_cmd "brew install git"
+  has_cmd ansible || run_cmd "brew install ansible"
+  if $REQUIRE_OP; then
+    has_cmd op || run_cmd "brew install 1password-cli"
+  fi
+  end_task_success
+}
+
+update_ansible_galaxy() {
+  $SKIP_GALAXY && { printf "${YELLOW} [!]  ${WHITE}Skipping Ansible Galaxy dependencies${NC}\n"; return; }
+  local os_id="$1"; local extra=""
+  start_task "Installing Ansible Galaxy dependencies"
+  if [ -f "${DOTFILES_DIR}/requirements/${os_id}.yml" ]; then
+    extra="${DOTFILES_DIR}/requirements/${os_id}.yml"
+  fi
+  if [ -n "$extra" ]; then
+    run_cmd "ansible-galaxy install -r ${DOTFILES_DIR}/requirements/common.yml -r ${extra}"
+  else
+    run_cmd "ansible-galaxy install -r ${DOTFILES_DIR}/requirements/common.yml"
+  fi
+  end_task_success
+}
+
+confirm_vault_access() {
+  start_task "Checking 1Password CLI"
+  if ! has_cmd op; then end_task_fail "1Password CLI is required but not installed (use --require-op or install op)"; fi
+  if ! op --version >/dev/null 2>&1; then end_task_fail "Cannot run op --version"; fi
+  # A lightweight auth check (list accounts or vaults)
+  if ! op account list >/dev/null 2>&1 && ! op vault list >/dev/null 2>&1; then
+    end_task_fail "1Password CLI not authenticated. Run: op signin"
+  fi
+  end_task_success
+}
+
+# ------------------------------
+# Repo & Config
+# ------------------------------
+ensure_dotfiles_repo() {
+  if [ ! -d "${DOTFILES_DIR}" ]; then
+    start_task "Cloning dotfiles repo"
+    run_cmd "git clone --quiet ${DOTFILES_REPO_URL} ${DOTFILES_DIR}"
+    end_task_success
+  else
+    start_task "Updating dotfiles repo"
+    run_cmd "git -C ${DOTFILES_DIR} pull --quiet --rebase --autostash || git -C ${DOTFILES_DIR} pull --quiet"
+    end_task_success
+  fi
+}
+
+ensure_groupvars_all() {
+  if [ ! -f "${CONFIG_FILE}" ]; then
+    mkdir -p "$(dirname "${CONFIG_FILE}")"
+    if [ -f "${CONFIG_FILE}.example" ]; then
+      start_task "Creating group_vars/all.yml from example"
+      run_cmd "cp '${CONFIG_FILE}.example' '${CONFIG_FILE}'"
+      end_task_success
+    else
+      start_task "Creating empty group_vars/all.yml"
+      : >"${CONFIG_FILE}"
+      printf '# Your configuration goes here\n' >>"${CONFIG_FILE}"
+      end_task_success
+    fi
+  fi
+}
+
+# ------------------------------
+# Role lifecycle
+# ------------------------------
+export_helpers_for_child() {
+  export -f start_task end_task_success end_task_fail run_cmd spinner
+  export SPINNER_PID TASK DOTFILES_LOG
+  export BOLD NC CAT_RED CAT_GREEN CAT_YELLOW CAT_BLUE CAT_MAUVE CAT_TEAL CAT_SAPPHIRE CAT_TEXT CAT_OVERLAY1 ORANGE GREEN RED YELLOW BLUE PURPLE CYAN WHITE CHECK_MARK X_MARK PIN CLOCK ARROW BOOK HOT WARNING
+}
+
+run_uninstall_script() {
+  local role="$1"; local role_dir="${DOTFILES_DIR}/roles/${role}"; local uninstall_script="${role_dir}/uninstall.sh"
+  if [ ! -d "${role_dir}" ]; then printf "${RED} [✗]  ${WHITE}Role '%s' not found${NC}\n" "$role"; return 1; fi
+  if [ ! -f "${uninstall_script}" ]; then printf "${RED} [✗]  ${WHITE}Role '%s' has no uninstall.sh${NC}\n" "$role"; return 1; fi
+  export_helpers_for_child
+  bash "${uninstall_script}"
+}
+
+handle_uninstall_or_delete() {
+  if [ -n "${UNINSTALL_ROLE}" ]; then
+    if confirm "Uninstall ${UNINSTALL_ROLE}?"; then
+      run_uninstall_script "${UNINSTALL_ROLE}" || exit 1
+      printf "${GREEN} [✓]  ${WHITE}%s uninstalled${NC}\n" "${UNINSTALL_ROLE}"
+    else
+      printf "${YELLOW} [!]  ${WHITE}Uninstall cancelled${NC}\n"
+    fi
+    exit 0
+  fi
+
+  if [ -n "${DELETE_ROLE}" ]; then
+    local role_dir="${DOTFILES_DIR}/roles/${DELETE_ROLE}"; local uninstall_script="${role_dir}/uninstall.sh"
+    if [ ! -d "${role_dir}" ]; then printf "${RED} [✗]  ${WHITE}Role '%s' not found${NC}\n" "${DELETE_ROLE}"; exit 1; fi
+
+    if confirm "Delete role ${DELETE_ROLE}$( [ -f "${uninstall_script}" ] && printf ' (with uninstall)' )?"; then
+      [ -f "${uninstall_script}" ] && { run_uninstall_script "${DELETE_ROLE}" || printf "${YELLOW} [!]  ${WHITE}Uninstall failed; continuing with delete${NC}\n"; }
+      if [ -f "${CONFIG_FILE}" ] && grep -q "^  - ${DELETE_ROLE}$" "${CONFIG_FILE}"; then
+        start_task "Removing ${DELETE_ROLE} from group_vars/all.yml"
+        portable_sed_delete_line "^  - ${DELETE_ROLE}$" "${CONFIG_FILE}"
+        end_task_success
+      fi
+      start_task "Deleting role directory"
+      run_cmd "rm -rf '${role_dir}'"
+      end_task_success
+      printf "${GREEN} [✓]  ${WHITE}%s deleted${NC}\n" "${DELETE_ROLE}"
+    else
+      printf "${YELLOW} [!]  ${WHITE}Delete cancelled${NC}\n"
+    fi
+    exit 0
+  fi
+}
+
+# ------------------------------
+# Ansible execution
+# ------------------------------
+run_ansible() {
+  # Only remove vault secret if explicitly requested (safer default)
+  if ${REQUIRE_OP}; then
+    [ -f "${VAULT_SECRET_FILE}" ] && rm -f "${VAULT_SECRET_FILE}" || true
+  fi
+  start_task "Applying dotfiles via Ansible"
+  ( cd "${DOTFILES_DIR}" && ansible-playbook "${DOTFILES_DIR}/main.yml" "$@" ) || end_task_fail "ansible-playbook failed"
+  end_task_success
+}
+
+# ------------------------------
+# Banner
+# ------------------------------
+print_banner() {
+  printf "\n${CAT_SAPPHIRE}${BOLD}Dotfiles Installer${NC} ${WHITE}- Modernised${NC}\n\n"
+}
+
+# ------------------------------
+# CLI parsing
+# ------------------------------
+usage() {
+  cat <<EOF
+Usage: ${SCRIPT_NAME} [options] [-- [ansible args...]]
+
+Options:
+  --os <id>            Override detected OS (ubuntu|arch|fedora|darwin)
+  --non-interactive    Never prompt (assumes No for confirmations)
+  --yes, -y            Assume Yes for confirmations
+  --require-op         Require and validate 1Password CLI authentication
+  --skip-galaxy        Skip ansible-galaxy role installs
+  --uninstall <role>   Run uninstall for a role and exit
+  --delete <role>      Uninstall (if present) and delete role directory
+  --verbose, -v        Verbose logging of command outputs
+  --help, -h           Show this help
+
+All remaining args after '--' are passed to ansible-playbook.
+EOF
+}
+
+ANSIBLE_ARGS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --os) OS_OVERRIDE="${2:-}"; shift 2 ;;
+    --non-interactive) NON_INTERACTIVE=true; shift ;;
+    --yes|-y) ASSUME_YES=true; shift ;;
+    --require-op) REQUIRE_OP=true; shift ;;
+    --skip-galaxy) SKIP_GALAXY=true; shift ;;
+    --uninstall) UNINSTALL_ROLE="${2:-}"; shift 2 ;;
+    --delete) DELETE_ROLE="${2:-}"; shift 2 ;;
+    --verbose|-v) VERBOSE=true; shift ;;
+    --help|-h) usage; exit 0 ;;
+    --) shift; ANSIBLE_ARGS=("$@"); break ;;
+    *) ANSIBLE_ARGS+=("$1"); shift ;;
+  esac
+done
+
+# ------------------------------
+# Main
+# ------------------------------
+print_banner
+log_init
+
+# Early lifecycle ops
+handle_uninstall_or_delete
+
+# Ensure repo and config
+ensure_dotfiles_repo
+ensure_groupvars_all
+
+# OS bootstrap
+OS_ID=$(detect_os)
+start_task "Detected OS: ${OS_ID}"
+end_task_success
+case "${OS_ID}" in
+  ubuntu) ubuntu_setup ;;
+  arch)   arch_setup ;;
+  fedora) fedora_setup ;;
+  darwin) darwin_setup ;;
+  *) printf "${RED} [✗]  ${WHITE}Unsupported OS: %s${NC}\n" "${OS_ID}"; exit 1 ;;
+ esac
+
+# Optional vault auth
+$REQUIRE_OP && confirm_vault_access || true
+
+# Ansible Galaxy deps
+update_ansible_galaxy "${OS_ID}"
+
+# Apply config
+run_ansible "${ANSIBLE_ARGS[@]}"
+
+# First run tips
+if [ ! -f "${IS_FIRST_RUN_MARKER}" ]; then
+  printf "\n${CHECK_MARK} ${CAT_GREEN}Dotfiles installation complete!${NC}\n\n"
+  printf "${ARROW} ${CYAN}Next steps:${NC}\n"
+  printf "   1. Edit config: ${PURPLE}nvim ~/.dotfiles/group_vars/all.yml${NC}\n"
+  printf "   2. Re-apply anytime: ${PURPLE}${SCRIPT_NAME}${NC}\n"
+  printf "   3. Help: ${PURPLE}https://discord.gg/5M4hjfyRBj${NC}\n\n"
+  printf "${ARROW} ${CYAN}Consider rebooting to finalise environment changes.${NC}\n\n"
+  : >"${IS_FIRST_RUN_MARKER}"
+fi
