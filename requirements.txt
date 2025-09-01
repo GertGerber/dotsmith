@@ -1,0 +1,6 @@
+ansible>=9
+ansible-lint>=24
+yamllint>=1.35
+molecule>=24
+molecule-plugins[docker]>=23
+pytest>=8

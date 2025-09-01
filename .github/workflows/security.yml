@@ -1,0 +1,50 @@
+---
+name: Security
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+
+jobs:
+  gitleaks:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          config: |
+            detect --source . --no-banner --redact
+
+
+  # Optional: Uncomment to enable Trivy filesystem scanning
+  # trivy:
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: Install Trivy
+  #       uses: aquasecurity/trivy-action@0.24.0
+  #       with:
+  #         scan-type: fs
+  #         format: table
+  #         exit-code: '0'
+  #         severity: 'CRITICAL,HIGH'
+
+  # Optional: Uncomment to enable Checkov for IaC
+  # checkov:
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: Run Checkov
+  #       uses: bridgecrewio/checkov-action@v12
+  #       with:
+  #         directory: .

@@ -1,0 +1,41 @@
+---
+# ansible-lint v24+ compatible configuration
+# Docs: https://ansible.readthedocs.io/projects/lint/configuring/
+
+# Use one of: null, min, basic, moderate, safety, shared, production
+profile: production
+
+exclude_paths:
+  - .venv/
+  - .github/
+  - roles/*/molecule/
+  - .cache/
+
+# Enable default rule-set
+use_default_rules: true
+
+# Optional opt-in rules (uncomment as needed)
+# enable_list:
+#   - yaml
+#   - empty-string-compare
+#   - no-log-password
+#   - name[prefix]
+
+# Rules/tags that will only warn (not fail)
+warn_list:
+  - experimental
+  - yaml
+
+# Prefer file-specific ignores via .ansible-lint-ignore
+skip_list: []
+
+# Mocks to satisfy syntax checks without real deps
+mock_modules: []
+mock_roles: []
+
+# Keep CI fast/offline-friendly
+offline: true
+
+# Example extra vars for syntax checks (adjust/remove as needed)
+extra_vars:
+  example_var: example

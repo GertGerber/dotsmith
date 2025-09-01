@@ -1,0 +1,106 @@
+---
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  lint-and-test:
+    name: Lint & Test (Ubuntu ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-22.04, ubuntu-24.04 ]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python (for ansible/linters)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          # Shell tools
+          sudo apt-get install -y shellcheck shfmt bats
+          # Python deps for Ansible + linters
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install \
+              ansible ansible-lint yamllint \
+              molecule molecule-plugins[docker] \
+              pytest
+          fi
+
+      - name: Shell formatting (shfmt)
+        run: |
+          shfmt -d -i 2 -bn -ci .
+
+      - name: Shell lint (shellcheck)
+        run: |
+          set -e
+          mapfile -t FILES < <(git ls-files '*.sh' ':!:**/.venv/**' || true)
+          if [ "${#FILES[@]}" -gt 0 ]; then
+            echo "Running shellcheck on ${#FILES[@]} file(s)..."
+            shellcheck -x "${FILES[@]}"
+          else
+            echo "No shell scripts found; skipping shellcheck."
+          fi
+
+      - name: YAML lint (yamllint)
+        run: |
+          yamllint -s .
+
+      - name: Ansible syntax check
+        if: hashFiles('**/*.yml') != ''
+        run: |
+          ansible-playbook --syntax-check -i inventories/example/hosts.ini playbooks/*.yml
+
+      - name: ansible-lint
+        run: |
+          ansible-lint
+
+      - name: Molecule (roles)
+        if: hashFiles('roles/**/molecule/*/molecule.yml') != ''
+        run: |
+          set -euo pipefail
+          mapfile -t SCENARIOS < <(find roles -type f -path '*/molecule/*/molecule.yml' | sort || true)
+          echo "Found ${#SCENARIOS[@]} Molecule scenario(s)."
+          for f in "${SCENARIOS[@]}"; do
+            role_dir="$(cd "$(dirname "$f")/../.." && pwd)"   # roles/<role>
+            scenario="$(basename "$(dirname "$f")")"          # scenario name
+            echo "::group::molecule test - role=$(basename "$role_dir") scenario=$scenario"
+            ( cd "$role_dir" && molecule test -s "$scenario" )
+            echo "::endgroup::"
+          done
+
+      - name: Bats tests (if present)
+        if: hashFiles('test/**/*.bats') != ''
+        run: |
+          bats test
+
+      - name: Shell formatting (shfmt)
+        run: |
+          mapfile -t FILES < <(git ls-files '*.sh' ':!:**/.venv/**' || true)
+          if [ "${#FILES[@]}" -gt 0 ]; then
+            shfmt -d -i 2 -bn -ci "${FILES[@]}"
+          else
+            echo "No shell scripts found; skipping shfmt."
+          fi

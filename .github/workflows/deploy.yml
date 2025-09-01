@@ -1,0 +1,208 @@
+---
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment (must match a GitHub Environment)"
+        type: environment
+        required: true
+      inventory:
+        description: "Path to inventory (e.g. inventories/staging/hosts.ini)"
+        type: string
+        required: true
+      playbook:
+        description: "Playbook to run (e.g. playbooks/site.yml)"
+        type: string
+        required: true
+      limit:
+        description: "Optional --limit host pattern (e.g. web01 or web:db)"
+        type: string
+        required: false
+        default: ""
+      tags:
+        description: "Optional --tags (comma-separated)"
+        type: string
+        required: false
+        default: ""
+      extra_vars_json:
+        description: "Optional extra vars as JSON (e.g. {\"version\":\"1.2.3\"})"
+        type: string
+        required: false
+        default: ""
+      check_mode:
+        description: "Run in --check (dry run) first"
+        type: boolean
+        required: true
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.ref }}-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: Plan (Ansible --check)
+    if: ${{ inputs.check_mode == true }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Ansible toolchain
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install ansible ansible-lint yamllint
+          fi
+          ansible --version
+          ansible-galaxy collection install -r collections/requirements.yml 2>/dev/null || true
+          ansible-galaxy role install -r roles/requirements.yml 2>/dev/null || true
+
+      - name: Prepare SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          if [ -n "$SSH_PRIVATE_KEY" ]; then
+            echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+            chmod 600 ~/.ssh/id_rsa
+          fi
+          if [ -n "$SSH_KNOWN_HOSTS" ]; then
+            echo "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          else
+            touch ~/.ssh/known_hosts
+          fi
+          printf "Host *\n  IdentityFile ~/.ssh/id_rsa\n  ServerAliveInterval 60\n" >> ~/.ssh/config
+
+      - name: Build ansible-playbook command (plan)
+        id: cmd
+        env:
+          LIMIT: ${{ inputs.limit }}
+          TAGS: ${{ inputs.tags }}
+          EXTRA_VARS_JSON: ${{ inputs.extra_vars_json }}
+        run: |
+          CMD=(ansible-playbook "${{ inputs.playbook }}" -i "${{ inputs.inventory }}" --check -vv)
+          [ -n "$LIMIT" ] && CMD+=(--limit "$LIMIT")
+          [ -n "$TAGS" ] && CMD+=(--tags "$TAGS")
+          if [ -n "$EXTRA_VARS_JSON" ]; then
+            echo "$EXTRA_VARS_JSON" | python -c "import json,sys;json.load(sys.stdin)" >/dev/null
+            CMD+=(--extra-vars "$EXTRA_VARS_JSON")
+          fi
+          printf "%s " "${CMD[@]}" > plan_cmd.sh
+          echo "cmd=$(cat plan_cmd.sh)" >> $GITHUB_OUTPUT
+
+      - name: Run plan
+        env:
+          ANSIBLE_STDOUT_CALLBACK: yaml
+          ANSIBLE_FORCE_COLOR: "true"
+          ANSIBLE_HOST_KEY_CHECKING: "true"
+          ANSIBLE_VAULT_PASSWORD: ${{ secrets.ANSIBLE_VAULT_PASSWORD }}
+        run: |
+          set -e
+          if [ -n "$ANSIBLE_VAULT_PASSWORD" ]; then
+            bash -lc '${{ steps.cmd.outputs.cmd }} --vault-password-file <(printf "$ANSIBLE_VAULT_PASSWORD")' | tee plan.log
+          else
+            bash -lc '${{ steps.cmd.outputs.cmd }}' | tee plan.log
+          fi
+
+      - name: Upload plan logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: plan-${{ inputs.environment }}
+          path: plan.log
+
+  deploy:
+    name: Deploy
+    needs: [plan]
+    environment: ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Ansible toolchain
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install ansible ansible-lint yamllint
+          fi
+          ansible-galaxy collection install -r collections/requirements.yml 2>/dev/null || true
+          ansible-galaxy role install -r roles/requirements.yml 2>/dev/null || true
+
+      - name: Prepare SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          if [ -n "$SSH_PRIVATE_KEY" ]; then
+            echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+            chmod 600 ~/.ssh/id_rsa
+          fi
+          if [ -n "$SSH_KNOWN_HOSTS" ]; then
+            echo "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          else
+            echo "StrictHostKeyChecking no" >> ~/.ssh/config
+          fi
+          printf "Host *\n  IdentityFile ~/.ssh/id_rsa\n  ServerAliveInterval 60\n" >> ~/.ssh/config
+
+      - name: Build ansible-playbook command (apply)
+        id: cmd
+        env:
+          LIMIT: ${{ inputs.limit }}
+          TAGS: ${{ inputs.tags }}
+          EXTRA_VARS_JSON: ${{ inputs.extra_vars_json }}
+        run: |
+          CMD=(ansible-playbook "${{ inputs.playbook }}" -i "${{ inputs.inventory }}" -vv)
+          [ -n "$LIMIT" ] && CMD+=(--limit "$LIMIT")
+          [ -n "$TAGS" ] && CMD+=(--tags "$TAGS")
+          if [ -n "$EXTRA_VARS_JSON" ]; then
+            echo "$EXTRA_VARS_JSON" | python -c "import json,sys;json.load(sys.stdin)" >/dev/null
+            CMD+=(--extra-vars "$EXTRA_VARS_JSON")
+          fi
+          printf "%s " "${CMD[@]}" > apply_cmd.sh
+          echo "cmd=$(cat apply_cmd.sh)" >> $GITHUB_OUTPUT
+
+      - name: Run deploy
+        env:
+          ANSIBLE_STDOUT_CALLBACK: yaml
+          ANSIBLE_FORCE_COLOR: "true"
+          ANSIBLE_HOST_KEY_CHECKING: "true"
+          ANSIBLE_VAULT_PASSWORD: ${{ secrets.ANSIBLE_VAULT_PASSWORD }}
+        run: |
+          set -e
+          if [ -n "$ANSIBLE_VAULT_PASSWORD" ]; then
+            bash -lc '${{ steps.cmd.outputs.cmd }} --vault-password-file <(printf "$ANSIBLE_VAULT_PASSWORD")' | tee deploy.log
+          else
+            bash -lc '${{ steps.cmd.outputs.cmd }}' | tee deploy.log
+          fi
+
+      - name: Upload deploy logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-${{ inputs.environment }}
+          path: deploy.log
